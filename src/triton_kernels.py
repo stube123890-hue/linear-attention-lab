@@ -143,3 +143,50 @@ class SelectiveSegmentedStateTriton(nn.Module):
                               device=x.device, dtype=torch.float32)
         h_seq = triton_selective_scan(u, gp, keep)
         return self.dropout(self.out_proj(h_seq.to(x.dtype)))
+
+
+class SelectiveSegmentedStateV7(nn.Module):
+    """V7 mixer: V6's Triton-fused selective scan + two literature grafts.
+
+    Graft #1 — output gate + state normalization (HGRN2 / Mamba-2 / GDN):
+        y_t = C · (o_t ⊙ RMSNorm(h_t)),   o_t = σ(W_o x_t + b_o)
+    States accumulate over segments so readout scale drifts; every strong
+    post-Mamba block gates the readout. RMSNorm here is parameter-free
+    (no scale vector) to keep the parameter budget exact.
+
+    Graft #3 — layer-graded forget floor (HGRN, NeurIPS'23):
+        g_t = σ(W_g x_t + b_g + floor_l)
+    floor_l is a per-layer learnable scalar, initialized monotonically
+    increasing bottom→top, so low layers forget fast (spelling-level) and
+    top layers retain (phrase-level). Complements the newline hard reset.
+
+    The recurrence math is UNCHANGED → the same fused Triton kernel as V6.
+    With FFN 1023 the budget lands EXACTLY on the attention baseline.
+    """
+    def __init__(self, dim, state_dim=256, dropout=0.0, forget_floor_init=0.0):
+        super().__init__()
+        assert state_dim == BLOCK_S, "V7 kernel fuses a 256-wide state"
+        self.state_dim = state_dim
+        self.in_proj = nn.Linear(dim, state_dim, bias=False)
+        self.gate_proj = nn.Linear(dim, state_dim)
+        self.out_gate_proj = nn.Linear(dim, state_dim)
+        self.out_proj = nn.Linear(state_dim, dim, bias=False)
+        self.forget_floor = nn.Parameter(
+            torch.tensor(float(forget_floor_init)))
+        self.dropout = nn.Dropout(dropout)
+        self.eps = 1e-6
+
+    def forward(self, x, reset=None):
+        u = self.in_proj(x).float().contiguous()
+        gp = (self.gate_proj(x) + self.forget_floor).float().contiguous()
+        og = self.out_gate_proj(x).float()
+        if reset is not None:
+            keep = (1.0 - reset).float().contiguous()
+        else:
+            keep = torch.ones(x.shape[0], x.shape[1],
+                              device=x.device, dtype=torch.float32)
+        h_seq = triton_selective_scan(u, gp, keep)          # (B,T,S)
+        h_norm = h_seq / torch.sqrt(
+            (h_seq ** 2).mean(dim=-1, keepdim=True) + self.eps)
+        y = self.out_proj((torch.sigmoid(og) * h_norm).to(x.dtype))
+        return self.dropout(y)

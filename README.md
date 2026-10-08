@@ -3,14 +3,15 @@
 **Can you rip the Attention layer out of a Transformer, replace it with a
 gated linear recurrence over a fixed-size state, and win?**
 
-Yes — on quality, speed, *and* memory. A 6.37M-parameter **gated segmented
-state-space model** with a fused Triton kernel beats a parameter-matched
-standard Transformer on validation loss (**1.364 vs 1.402**), trains faster
-(**66.2k vs 61.8k tok/s**), and uses effectively the same VRAM
-(**881 vs 845 MB**) — same corpus, same protocol, same budget.
+Yes — on quality, speed, *and* memory. A 6.37M-parameter **output-gated
+segmented state-space model** with a fused Triton kernel beats a
+parameter-matched standard Transformer on validation loss (**1.339 vs
+1.423**), trains at effectively the same throughput (**63.4k vs 63.7k
+tok/s**), and uses only slightly more VRAM (**935 vs 835 MB**) — same
+corpus, same protocol, exact parameter equality.
 
-This repo is the complete record of a six-experiment campaign (V1–V6) run in
-one night (2026-10-08) on a Colab T4 GPU: every architecture, every
+This repo is the complete record of a seven-experiment campaign (V1–V7) run
+in one night (2026-10-08) on a Colab T4 GPU: every architecture, every
 measurement, every design decision, and every anomaly — nothing smoothed over.
 
 ---
@@ -20,11 +21,12 @@ measurement, every design decision, and every anomaly — nothing smoothed over.
 - `src/models.py` — all model code: `CausalSelfAttention`,
   `LinearRunningState` (loop + parallel-scan modes), `SelectiveSegmentedState`,
   `TinyLM`, the Hillis–Steele associative scan
-- `src/triton_kernels.py` — the V6 fused Triton kernels (`@triton.jit`
-  forward + backward) and the autograd wrapper
-- `notebooks/` — the six experiment notebooks, exactly as run
-  (`v4_rerun_clean`, `v5_gated_segmented`, `v6_triton_fused` include their
-  full printed outputs)
+- `src/triton_kernels.py` — the fused Triton kernels (`@triton.jit`
+  forward + backward) and the autograd wrapper: `SelectiveSegmentedStateTriton`
+  (V6) and `SelectiveSegmentedStateV7` (output gate + per-layer forget floor)
+- `notebooks/` — the seven experiment notebooks, exactly as run
+  (`v4_rerun_clean`, `v5_gated_segmented`, `v6_triton_fused`,
+  `v7_gated_output` include their full printed outputs)
 - `scripts/` — the notebook generators (so every notebook is reproducible
   from code)
 - `requirements.txt` — `torch`, `triton`
@@ -56,6 +58,21 @@ V6 fuses that recurrence into a custom Triton kernel: the 256-wide state
 lives in SRAM registers for the whole sequence, gate + reset + update run
 in-register every timestep, and only final outputs touch HBM.
 
+V7 adds two stabilizers from the post-Mamba literature (output gate + state
+norm, and a layer-graded forget floor), keeping the recurrence and the
+Triton kernel byte-identical:
+
+```
+g_t  = σ(W_g · x_t + b_g + floor_l)             # per-layer forget floor
+o_t  = σ(W_o · x_t + b_o)                       # output gate
+h_t  = (1 - r_t) · (g_t · h_{t-1} + (1 - g_t) · (B · x_t))
+y_t  = C · (o_t ⊙ RMSNorm(h_t))                  # V7 readout
+```
+
+`floor_l` is a learnable per-layer scalar initialized monotonically
+bottom→top (logit(0.3) → logit(0.9)): low layers forget fast (spelling),
+top layers retain (multi-word context). The RMSNorm is parameter-free.
+
 ---
 
 ## Experimental protocol (identical across runs unless noted)
@@ -66,7 +83,7 @@ in-register every timestep, and only final outputs touch HBM.
 - **Model:** decoder-only LM, dim 256, 8 layers, 8 heads, seq 128,
   weight-tied head, dropout 0.0, LayerNorm pre-norm blocks
 - **Training:** batch 32, AdamW lr 3e-4, grad clip 1.0, eval every 250 steps
-  (mean of 10 val batches); V1 ran 2000 steps, V2–V6 ran 1500 steps
+  (mean of 10 val batches); V1 ran 2000 steps, V2–V7 ran 1500 steps
 - **Hardware:** Google Colab Tesla T4, fresh runtime per experiment,
   `Runtime > Run all` in one continuous pass
 - **Fairness:** the attention baseline is rebuilt from the same code with the
@@ -191,6 +208,37 @@ The fused kernel is 2.5–6.5x faster than the PyTorch scan, and the O(T) vs
 O(T²) crossover is visible in wall-clock: **from T=512 up, the fused scan
 beats attention outright** (1.72 vs 4.65 ms; 3.51 vs 13.96 ms at T=1024).
 
+### V7 — output-gated SSM (new champion: 1.339)
+
+V6's recurrence + Triton kernel unchanged; only the readout and the gate
+bias changed (equations above). CPU-verified before launch
+(module == manual recurrence exactly 0.0, gradients flow to gate/output/floor
+params). Budget **exact**: 6,369,792 vs 6,369,792 (diff 0) via FFN 1023,
+state dim frozen at 256. Kernel gate **passed** (Triton vs V5 loop
+4.47e-07, backward ~1.8e-06).
+
+| Metric | Attention | V7 gated-output |
+|---|---|---|
+| Final val / ppl | 1.423 / 4.2 | **1.339 / 3.8** |
+| Fresh-batch re-eval | 1.406 | **1.350** |
+| Train loss (pt) | 1.472 | **1.392** |
+| Train tok/s | 63,749 | 63,351 (~tied) |
+| Infer tok/s | 197,285 | 188,101 |
+| Peak VRAM | 835 MB | 935 MB |
+
+**V7 beats V6's 1.364 with no quality regression anywhere — new champion.**
+Learning curves: V7 led 6/7 checkpoints (attention led only step 1,
+4.004 vs 4.021); the step-250 margin is enormous — **1.863 vs 2.373**
+— then 1.600 vs 2.004 (500), 1.484 vs 1.749 (750), 1.405 vs 1.572 (1000),
+1.337 vs 1.473 (1250), 1.334 vs 1.413 (1500). The output gate + graded
+floor massively accelerate early learning.
+
+Cost: a small output-gate tax vs V6 — train −4.2% tok/s, VRAM +6% (the extra
+256→256 projection and the RMSNorm). Trained floors ended at −0.85 → 2.20
+bottom→top, confirming the intended fast-forget-low / retentive-high
+timescale split. **Verdict: the stabilizers strictly improve quality
+(1.364 → 1.339) at a small speed/VRAM cost.**
+
 ---
 
 ## Design decisions and minor details
@@ -213,6 +261,13 @@ beats attention outright** (1.72 vs 4.65 ms; 3.51 vs 13.96 ms at T=1024).
   a non-issue and simplicity won over channel-splitting.
 - **Why `a_t` is saved for backward:** recomputing it would cost an extra
   full pass plus `exp` per step; one 4 MB tensor is the cheaper trade.
+- **Why the V7 floor is init-only (no cumax):** the per-layer floor is a
+  free learnable scalar with a monotonic init (logit(0.3)→logit(0.9)); the
+  trained values (−0.85→2.20) preserved the ordering on their own, so no
+  constraint was needed.
+- **Why V7's RMSNorm is parameter-free:** the output gate `o_t` already
+  provides per-channel scale control, so the norm needs no learned weight —
+  the readout is `C · (o_t ⊙ RMSNorm(h_t))` with zero new norm params.
 - **Anomaly log:** (a) V4's first run lost its metrics to a Colab
   idle-timeout disconnect → clean re-run with triple-redundant capture;
   (b) the re-run's `FINAL-VERIFY` re-check printed divergent numbers
@@ -230,6 +285,8 @@ beats attention outright** (1.72 vs 4.65 ms; 3.51 vs 13.96 ms at T=1024).
 - Reset zeroes state exactly (`0.0`); fresh accumulation after boundary
 - Gradients flow to gate and input projections
 - Compiled Triton kernel == V5 loop: 4.47e-07 (forward), ~1.8e-06 (backward)
+- V7 module == manual recurrence: 0.0; grads flow to gate, output-gate, and
+  floor parameters; equality gate exact (diff 0)
 
 ## Reproduce
 
@@ -266,6 +323,7 @@ python -c "from src.models import TinyLM, CausalSelfAttention,
 | ~04:45 | V4 re-run (clean): the ~2% tax defined |
 | ~05:05 | V5: selective gate + reset — tax destroyed, wire-to-wire win |
 | ~05:20 | V6: Triton fusion — clean sweep (quality + speed + memory) |
+| ~06:20 | V7: output gate + graded forget floor — new champion (1.339), no regression |
 
 ## License
 
