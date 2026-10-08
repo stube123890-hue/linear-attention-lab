@@ -10,8 +10,8 @@ parameter-matched standard Transformer on validation loss (**1.319 vs
 advantage from T=512 up, and pays only a modest throughput tax (**58.8k vs
 60.9k tok/s**) — same corpus, same protocol, exact parameter equality.
 
-This repo is the complete record of an eleven-experiment campaign (V1–V9) run
-in one night (2026-10-08) on a Colab T4 GPU: every architecture, every
+This repo is the complete record of a thirteen-experiment campaign (V1–V11) run
+2026-10-08→09 on a Colab T4 GPU: every architecture, every
 measurement, every design decision, and every anomaly — nothing smoothed over.
 
 ---
@@ -25,6 +25,8 @@ measurement, every design decision, and every anomaly — nothing smoothed over.
   forward + backward) and the autograd wrappers: `SelectiveSegmentedStateTriton`
   (V6), `SelectiveSegmentedStateV7` (output gate + per-layer forget floor),
   and `SelectiveSegmentedStateV8A` (diagonal gated delta rule)
+- `src/fused_mixer.py` — V11-D1: save-x-only autograd Function fusing the
+  scan-input projections with the existing Triton kernels (Path B)
 - `notebooks/` — the eleven experiment notebooks, exactly as run
   (`v4_rerun_clean`, `v5_gated_segmented`, `v6_triton_fused`,
   `v7_gated_output`, `v8a_delta_rule`, `v9a_replication`, `v9b_bf16`,
@@ -35,6 +37,10 @@ measurement, every design decision, and every anomaly — nothing smoothed over.
   skeleton for V8-A (kept as research notes, not publication claims)
 - `V9_RESEARCH_NOTES.md` — V9 verdicts: replication CONFIRM, bf16 and
   recompute levers falsified with mechanisms documented
+- `V10_RESEARCH_NOTES.md` — V10 verdicts: the memory-autopsy ladder
+  (E1/E2/E3/E4/E5, all rejected/failed/falsified with mechanisms)
+- `V11_RESEARCH_NOTES.md` — V11 verdicts: D2a PASS, D1 PASS (with the dx
+  transpose-bug saga), combined stack endpoint
 - `requirements.txt` — `torch`, `triton`
 
 ---
@@ -342,6 +348,31 @@ traffic it saves.
 with mechanisms documented. The 943 MB peak (~840 MB activations) remains
 open; V10 starts with a memory autopsy. Full notes in
 `V9_RESEARCH_NOTES.md`.
+
+### V10 — where are the ~943 MB going? (ladder: E1 reject, E2 reject, E3 reject, E4 fail, E5 falsified)
+
+Autopsy: mixer ~408 MB + FFN ~277 MB live at peak. Micro-batch accumulation
+valid (−62.1%) but rejected on throughput (+48.9%). `expandable_segments`
+−17 MB (negligible). `torch.compile` numerics pass but peak +27% (rejected as
+a memory lever; ~1.5× faster as a side finding). Optimizer offload −4 MB
+reserved, +36.3% step (structural fail). ActNN quantization falsified cleanly:
+peak +24.5% (forward transients dominate), +65% step — though the trajectory
+was preserved perfectly (stochastic rounding truly unbiased). Pattern: every
+post-hoc lever moves peak reserved negligibly or regresses it. Terminal
+decision: stop tweaking infrastructure; redesign WHEN activations
+materialize. Full notes in `V10_RESEARCH_NOTES.md`.
+
+### V11 — memory-lifetime redesign (D2a PASS, D1 PASS, stack: the endpoint)
+
+**D2a** (selective FFN checkpoint): 839 → 659 MB reserved (−180 MB), step
+−31.9% — faster, not slower. **D1** (fused projection+scan, save-x-only):
+628/705 MB (−134 MB, −16%), step −22%, grads 7.5e-10 vs the 1e-6 bar. The
+numerics saga is told honestly in the notes: a real transpose bug
+(`dx = du @ W.t()` instead of `du @ W`) hid behind a CPU pre-flight that
+never checked `dx`; a falsified TF32 theory died first. **Stack (D1+D2a)**:
+the meaningful V11 endpoint: 839 → 520 MB reserved (−38%), step −10.9%.
+Peak falls and step time falls at every stage: attacking
+creation/save time works where post-hoc compression didn't.
 
 ---
 
