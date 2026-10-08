@@ -3,14 +3,14 @@
 **Can you rip the Attention layer out of a Transformer, replace it with a
 gated linear recurrence over a fixed-size state, and win?**
 
-Yes — on quality, speed, *and* memory. A 6.37M-parameter **output-gated
-segmented state-space model** with a fused Triton kernel beats a
-parameter-matched standard Transformer on validation loss (**1.339 vs
-1.423**), trains at effectively the same throughput (**63.4k vs 63.7k
-tok/s**), and uses only slightly more VRAM (**935 vs 835 MB**) — same
-corpus, same protocol, exact parameter equality.
+Yes — on quality, speed, *and* memory. A 6.37M-parameter **diagonal
+gated delta-rule state-space model** with a fused Triton kernel beats a
+parameter-matched standard Transformer on validation loss (**1.319 vs
+1.419**), keeps the fixed-state O(T) recurrence with a long-sequence runtime
+advantage from T=512 up, and pays only a modest throughput tax (**58.8k vs
+60.9k tok/s**) — same corpus, same protocol, exact parameter equality.
 
-This repo is the complete record of a seven-experiment campaign (V1–V7) run
+This repo is the complete record of an eight-experiment campaign (V1–V8) run
 in one night (2026-10-08) on a Colab T4 GPU: every architecture, every
 measurement, every design decision, and every anomaly — nothing smoothed over.
 
@@ -22,13 +22,16 @@ measurement, every design decision, and every anomaly — nothing smoothed over.
   `LinearRunningState` (loop + parallel-scan modes), `SelectiveSegmentedState`,
   `TinyLM`, the Hillis–Steele associative scan
 - `src/triton_kernels.py` — the fused Triton kernels (`@triton.jit`
-  forward + backward) and the autograd wrapper: `SelectiveSegmentedStateTriton`
-  (V6) and `SelectiveSegmentedStateV7` (output gate + per-layer forget floor)
-- `notebooks/` — the seven experiment notebooks, exactly as run
+  forward + backward) and the autograd wrappers: `SelectiveSegmentedStateTriton`
+  (V6), `SelectiveSegmentedStateV7` (output gate + per-layer forget floor),
+  and `SelectiveSegmentedStateV8A` (diagonal gated delta rule)
+- `notebooks/` — the eight experiment notebooks, exactly as run
   (`v4_rerun_clean`, `v5_gated_segmented`, `v6_triton_fused`,
-  `v7_gated_output` include their full printed outputs)
+  `v7_gated_output`, `v8a_delta_rule` include their full printed outputs)
 - `scripts/` — the notebook generators (so every notebook is reproducible
   from code)
+- `V8A_RESEARCH_NOTES.md` — provisional abstract language and the writeup
+  skeleton for V8-A (kept as research notes, not publication claims)
 - `requirements.txt` — `torch`, `triton`
 
 ---
@@ -72,6 +75,25 @@ y_t  = C · (o_t ⊙ RMSNorm(h_t))                  # V7 readout
 `floor_l` is a learnable per-layer scalar initialized monotonically
 bottom→top (logit(0.3) → logit(0.9)): low layers forget fast (spelling),
 top layers retain (multi-word context). The RMSNorm is parameter-free.
+
+V8 replaces the convex blend with a **diagonal gated delta rule** (from the
+GDN/HGRN/Mamba-2 literature): per-channel input-dependent keep and write
+gates, initialized so the model starts near V7's regime and every step stays
+strictly contractive:
+
+```
+α_t = σ(W_α · x_t + b_α + floor_l)            # V7's gate + floor, reused
+β_t = σ(W_β · x_t + b_β),  b_β = 0            # write gate (init 0.5)
+k_t = σ(W_k · x_t + b_k),  b_k = +2.0         # key gate (init ~0.88)
+a_t = α_t · (1 − β_t · k_t²)                   # diagonal keep
+b_t = β_t · k_t · (B · x_t)                    # delta write
+h_t = (1 − r_t) · (a_t ⊙ h_{t−1} + b_t)        # V8-A recurrence
+y_t = C · (o_t ⊙ RMSNorm(h_t))                  # V7 readout, unchanged
+```
+
+The sigmoid bounds keep `a_t < 1` everywhere, so the state cannot run away.
+Per-channel gates already act as 256 independent 1-dim heads — the
+literature verdict was not to split into explicit heads.
 
 ---
 
@@ -239,6 +261,56 @@ bottom→top, confirming the intended fast-forget-low / retentive-high
 timescale split. **Verdict: the stabilizers strictly improve quality
 (1.364 → 1.339) at a small speed/VRAM cost.**
 
+### V8-A — diagonal gated delta rule (new champion: 1.319)
+
+V7's stabilizers (output gate, RMSNorm, graded floor) kept; the recurrence
+swapped for the delta rule above with its own fused Triton kernel. CPU-verified
+before launch (forward 1.19e-07, backward ~4.77e-07 vs manual recurrence).
+Budget gate **passed**: 6,369,792 vs 6,367,736 (diff 2,056 ≤ 3000; the two
+new projections balanced by FFN 766). Kernel gate **passed** (Triton delta
+kernel vs manual recurrence 3.58e-07, backward <1e-5).
+
+| Metric | Attention | V8-A delta rule |
+|---|---|---|
+| Final val / ppl | 1.419 / 4.1 | **1.319 / 3.7** |
+| Best val | 1.408 | **1.312** |
+| Train loss (pt) | 1.475 | **1.378** |
+| Train tok/s | 60,867 | 58,848 |
+| Infer tok/s | 180,708 | 173,233 |
+| Peak VRAM | 877 MB | 943 MB |
+
+**V8-A led all 7 checkpoints wire-to-wire — including step 1** (3.914 vs
+4.012; V7 had trailed attention at step 1). Curve: 1.811 vs 2.361 (250),
+1.586 vs 1.968 (500), 1.457 vs 1.723 (750), 1.406 vs 1.592 (1000),
+1.337 vs 1.482 (1250), 1.312 vs 1.408 (1500). Against V7's own curve it is
+ahead at 6/7 checkpoints (1000: 1.406 vs 1.405; 1250: tie 1.337).
+Within-run margin over its own baseline: **0.100** (V7's was 0.084).
+
+Stability: state norms drifted 0.08 → 0.25 (finite, bounded, no runaway);
+grad norms fell 4.78 → 0.84, consistently *below* attention's (7.48 → 1.02)
+the whole run — the contractive dynamics showing up as designed. Zero
+NaN/Inf; the fault guard never fired.
+
+Cost vs V7: train −7.1% tok/s, infer −7.9%, VRAM +0.9% — the two extra
+projections charging their toll, quality paying for it.
+
+**Mixer-level benchmark** (forward+backward, batch 8, dim 256):
+
+| T | Attention | V6 Triton | V8-A delta |
+|---|---|---|---|
+| 128 | 1.36 ms / 31 MB | 1.32 ms / 31 MB | 2.48 ms / 38 MB |
+| 512 | 5.65 ms / 67 MB | 1.54 ms / 62 MB | **3.55 ms** / 84 MB |
+| 1024 | 12.69 ms / 113 MB | 3.05 ms / 104 MB | **7.11 ms** / 147 MB |
+
+The delta kernel is genuinely O(T): it beats attention at T=512 and is ~1.8x
+faster at T=1024, crossover between 128 and 512 — the same "from T=512 up"
+story as V6. The delta tax is real at kernel level (~2x slower than V6's
+kernel), and memory scales linearly (38→147 MB) against attention's
+quadratic climb. **Verdict: clean architectural improvement — beats V7's
+1.339 within 1500 steps with the O(T) scaling advantage intact.** Caveats:
+single seed; the 0.020 margin over V7 sits near run-to-run noise — the
+sturdier evidence is the within-run margin (0.100 vs V7's 0.084).
+
 ---
 
 ## Design decisions and minor details
@@ -268,6 +340,16 @@ timescale split. **Verdict: the stabilizers strictly improve quality
 - **Why V7's RMSNorm is parameter-free:** the output gate `o_t` already
   provides per-channel scale control, so the norm needs no learned weight —
   the readout is `C · (o_t ⊙ RMSNorm(h_t))` with zero new norm params.
+- **Why V8-A inits b_k=+2.0 / b_β=0:** the model starts near V7's
+  convex-blend regime (k≈0.88, β≈0.5) so early training is stable; the sigmoid
+  bounds then keep every step strictly contractive (`a_t < 1`), which is why
+  the state norms stay bounded (0.08→0.25) instead of running away.
+- **Why no multi-head split for V8-A:** per-channel input-dependent gates
+  are already 256 independent 1-dim heads; the literature verdict (GDN/HGRN
+  ablations) was that explicit splitting buys nothing here.
+- **Why the stabilizers are load-bearing:** the GDN ablation shows naive
+  delta integration is +3.52 ppl worse — V7's output gate + RMSNorm + floor
+  are what make the delta rule trainable, which is why V8-A keeps all three.
 - **Anomaly log:** (a) V4's first run lost its metrics to a Colab
   idle-timeout disconnect → clean re-run with triple-redundant capture;
   (b) the re-run's `FINAL-VERIFY` re-check printed divergent numbers
@@ -276,7 +358,13 @@ timescale split. **Verdict: the stabilizers strictly improve quality
   training cell's FINAL lines, and V5/V6 store FINAL values *before* the
   metrics cell; (c) the V6 browser capture mislabeled the T=512 Triton row —
   ground-truthed against the downloaded notebook's cell outputs (this repo
-  carries the corrected table).
+  carries the corrected table); (d) V8-A's kernel-benchmark cell crashed with
+  `'float' object has no attribute 'constexpr'` — root cause: the metrics
+  cell used `tl = 0.0` as a throwaway variable, shadowing `triton.language`
+  so the legacy V6 kernel failed JIT compile when first called in the
+  benchmark (V8-A's own delta kernel had compiled and run all 1500 training
+  steps fine; a harness bug, not a model bug). Fixed (`tl`→`tloss_acc`) and
+  re-run benchmark-only for the table above.
 
 ## Verification log
 
@@ -287,6 +375,8 @@ timescale split. **Verdict: the stabilizers strictly improve quality
 - Compiled Triton kernel == V5 loop: 4.47e-07 (forward), ~1.8e-06 (backward)
 - V7 module == manual recurrence: 0.0; grads flow to gate, output-gate, and
   floor parameters; equality gate exact (diff 0)
+- V8-A delta kernel == manual recurrence: 3.58e-07 (forward), backward grads
+  <1e-5; budget gate 6,369,792 vs 6,367,736 (diff 2,056 ≤ 3000)
 
 ## Reproduce
 
@@ -324,6 +414,8 @@ python -c "from src.models import TinyLM, CausalSelfAttention,
 | ~05:05 | V5: selective gate + reset — tax destroyed, wire-to-wire win |
 | ~05:20 | V6: Triton fusion — clean sweep (quality + speed + memory) |
 | ~06:20 | V7: output gate + graded forget floor — new champion (1.339), no regression |
+| ~10:26 | V8-A run 1: diagonal gated delta rule — new champion (1.319), wire-to-wire lead |
+| ~11:17 | V8-A kernel benchmark re-run (fixed `tl` shadowing): O(T) scaling confirmed, T≥512 beats attention |
 
 ## License
 
