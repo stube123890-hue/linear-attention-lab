@@ -10,7 +10,7 @@ parameter-matched standard Transformer on validation loss (**1.319 vs
 advantage from T=512 up, and pays only a modest throughput tax (**58.8k vs
 60.9k tok/s**) — same corpus, same protocol, exact parameter equality.
 
-This repo is the complete record of an eight-experiment campaign (V1–V8) run
+This repo is the complete record of an eleven-experiment campaign (V1–V9) run
 in one night (2026-10-08) on a Colab T4 GPU: every architecture, every
 measurement, every design decision, and every anomaly — nothing smoothed over.
 
@@ -25,13 +25,16 @@ measurement, every design decision, and every anomaly — nothing smoothed over.
   forward + backward) and the autograd wrappers: `SelectiveSegmentedStateTriton`
   (V6), `SelectiveSegmentedStateV7` (output gate + per-layer forget floor),
   and `SelectiveSegmentedStateV8A` (diagonal gated delta rule)
-- `notebooks/` — the eight experiment notebooks, exactly as run
+- `notebooks/` — the eleven experiment notebooks, exactly as run
   (`v4_rerun_clean`, `v5_gated_segmented`, `v6_triton_fused`,
-  `v7_gated_output`, `v8a_delta_rule` include their full printed outputs)
+  `v7_gated_output`, `v8a_delta_rule`, `v9a_replication`, `v9b_bf16`,
+  `v9c_fused_bwd` include their full printed outputs)
 - `scripts/` — the notebook generators (so every notebook is reproducible
   from code)
 - `V8A_RESEARCH_NOTES.md` — provisional abstract language and the writeup
   skeleton for V8-A (kept as research notes, not publication claims)
+- `V9_RESEARCH_NOTES.md` — V9 verdicts: replication CONFIRM, bf16 and
+  recompute levers falsified with mechanisms documented
 - `requirements.txt` — `torch`, `triton`
 
 ---
@@ -310,6 +313,35 @@ quadratic climb. **Verdict: clean architectural improvement — beats V7's
 1.339 within 1500 steps with the O(T) scaling advantage intact.** Caveats:
 single seed; the 0.020 margin over V7 sits near run-to-run noise — the
 sturdier evidence is the within-run margin (0.100 vs V7's 0.084).
+
+---
+
+### V9-A — replication & generalization: CONFIRM
+
+5 seeds × (V8-A vs attention), 1500 steps. v8a finals
+1.324/1.311/1.311/1.302/1.312 (mean 1.312±0.008) vs attention
+1.432/1.365/1.404/1.406/1.404 (mean 1.402±0.024) — v8a won all 5 seeds, no
+flips, margin 0.090. enwik8: 1.527 vs 1.683; text8: 1.507 vs 1.519 (v8a led
+all 7 checkpoints on both). Zero-shot length: v8a flat 1.324→1.296 across
+T=128→2048 while attention degrades 1.432→3.33.
+
+### V9-B — bf16 scan-state storage: REJECTED
+
+Numerically clean (trajectory diffs ≤0.0004, final 1.326) but ~30% throughput
+regression (40,868 vs 58,848 tok/s) and only ~100 MB saved of a predicted
+350–400 — the activation footprint is distributed across the graph, not in
+the bf16 h/a tensors. Cut per the falsification protocol.
+
+### V9-C — fused recompute-backward: REJECTED
+
+Bit-identical grads (0.00e+00), −34 MB VRAM as predicted — but +10.8% step
+time for 34 MB is a bad trade. Recomputing `a` costs more than the memory
+traffic it saves.
+
+**V9's record: A confirms, B falsifies, C falsifies** — two VRAM levers killed
+with mechanisms documented. The 943 MB peak (~840 MB activations) remains
+open; V10 starts with a memory autopsy. Full notes in
+`V9_RESEARCH_NOTES.md`.
 
 ---
 
