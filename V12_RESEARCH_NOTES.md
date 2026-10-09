@@ -93,21 +93,18 @@ all 500 steps, identical vision-loss definition):
 | C | joint / ATTN | 0.5670 | 177.5 | 895/990 |
 | D | joint / V8-A | 0.5955 | 186.2 | 938/1053 |
 
-Δ_vis-only = −0.0101 (V8-A slightly better alone)
-Δ_joint = +0.0285 (V8-A worse together)
-**I = Δ_joint − Δ_vis-only = +0.0386 → joint HURTS V8-A's relative position.**
+Δ_vis-only = −0.0101; Δ_joint = +0.0285; **I = +0.0386.**
 
-Attention's vision improves with joint training (0.6035→0.5670); V8-A's
-does not (0.5934→0.5955). The pilot's gap-narrowing was misleading —
-without the vision-only Flickr8k control, we couldn't see that attention
-was the one benefiting from joint training.
-
-**Predeclared decision:** I>0 → STOP, do not extend joint training.
-
-**Limitation:** INIT MISMATCH on both verifications (encoder weights did
-not match across arms) — the comparison is confounded by initialization,
-not just the mixer. Future retests must assert tensor equality on shared
-components first.
+**Correction (his):** this does NOT conclusively falsify cross-modal rescue
+as a general hypothesis. It shows the hypothesis was not supported by the
+observed experiment and its predeclared decision rule. Tensor-level
+initialization verification FAILED (shared encoder weights did not match
+across arms), introducing an initialization confound that prevents clean
+causal attribution to the mixer architecture. Defensible conclusion: the
+hypothesis was not supported by the Phase 4 decision test; the observed
+interaction favored attention, but the init mismatch prevents clean causal
+attribution; the experiment was stopped per its predeclared rule. This does
+not establish that cross-modal rescue is universally impossible.
 
 **Evidence classification (his):**
 - OBSERVED: joint attention outperformed joint V8-A on the Flickr8k vision
@@ -121,19 +118,37 @@ components first.
 
 ## Campaign verdict
 
-The strongest current story is a **quality–efficiency trade-off that
-depends on modality and sequence length**, not a universal replacement for
-attention:
+**Seed robustness:** V9 text has five-seed support (V8-A 1.312±0.008 vs
+attention 1.402±0.024, V8-A winning all five seeds). V12's vision, audio,
+scaling, and Phase 4 results are single-seed and preliminary — they require
+controlled replication before broadening.
 
-- V8-A wins on temporal sequences (text clearly, audio narrowly)
-- Attention wins on spatial (vision) and on exploiting cross-modal context
-- V8-A's O(T) throughput advantage is real and growing (1.97x vision,
-  2.23x audio at T=2025; crossover at T≈256–529)
-- Attention is slightly leaner on VRAM at every measured rung
+**Directly measured:** V8-A text 1.319 vs 1.419 (V9: 1.312±0.008 vs
+1.402±0.024, 5 seeds); V11 stack 839→520 MB (−38%); V12 ImageNette
+attention 0.2102 vs V8-A 0.2578; V12 LibriSpeech V8-A 0.0552 vs attention
+0.0581; V12 throughput crossover T≈256–529 reaching ~1.97x (vision) /
+~2.23x (audio) at T=2025 under tested implementations and conditions;
+attention leaner VRAM at every rung.
 
-The failed cross-modal hypothesis belongs in the record. It prevented
-turning an encouraging but confounded pilot into an unsupported claim —
-exactly what a controlled research process is supposed to do.
+**Supported but narrow:** the tested temporal tasks favored V8-A on
+quality; the tested spatial vision task favored attention — a
+modality-dependent pattern in the evaluated configurations, not yet a
+general property.
+
+**Complexity scope:** fixed-state recurrence is O(T) under stated
+assumptions; measured speedups apply to these implementations, lengths,
+hardware, and conditions — not every linear-time model or workload.
+
+**Novelty boundary:** the evidence supports reporting a specific
+architecture, its implementation, measured results, and the experimental
+record. It does not yet establish general superiority, a universal
+modality law, or a field-wide multimodal SSM research gap.
+
+The strongest contribution is the combination of a concrete recurrent
+architecture, validated custom-kernel mathematics, measured systems
+improvements, parameter-controlled comparisons, multi-seed text evidence,
+and an explicit record of where the observed advantages do and do not
+appear.
 
 ## Future work (if revisiting)
 

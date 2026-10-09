@@ -43,8 +43,9 @@ measurement, every design decision, and every anomaly — nothing smoothed over.
   transpose-bug saga), combined stack endpoint
 - `V12_RESEARCH_NOTES.md` — V12 verdicts: multimodal probe — V8-A wins
   temporal (audio), attention wins spatial (vision); O(T) crossover at
-  T≈256–529 in both modalities; joint 2×2 control falsifies the
-  cross-modal rescue hypothesis (I=+0.0386)
+  T≈256–529 in both modalities; joint 2×2 did not support the cross-modal
+  rescue hypothesis (I=+0.0386, init confound noted); seed-robustness,
+  evidence boundaries, and novelty limits documented
 - `requirements.txt` — `torch`, `triton`
 
 ---
@@ -398,16 +399,18 @@ leaner VRAM at every rung — throughput, not memory, is where O(T) wins.
 
 **Phase 4 (joint multimodal, Flickr8k):** 500-step pilot suggested gap
 narrowing (80%), but the matched 2×2 control (A=vis/attn, B=vis/v8a,
-C=joint/attn, D=joint/v8a) gave I=+0.0386 — joint training *hurts* V8-A's
-relative position. Attention's vision improves with text context
-(0.6035→0.5670); V8-A's does not. Predeclared rule: STOP, do not extend.
-The pilot was confounded; the control falsified the rescue hypothesis.
-Init-verification mismatch noted as a limitation for future retests.
+C=joint/attn, D=joint/v8a) gave I=+0.0386 — the rescue hypothesis was not
+supported by the decision test. Attention's vision improved with text
+context (0.6035→0.5670); V8-A's did not. Predeclared rule: STOP, do not
+extend. Note: init verification failed (tensor mismatch), so causal
+attribution to the mixer is confounded — a retest with verified init is
+documented as future work.
 
-**Verdict:** a quality–efficiency trade-off depending on modality and
-sequence length — not a universal attention replacement. See
-`V12_RESEARCH_NOTES.md` for the full record including the evidence
-classification.
+**Verdict:** directly measured quality and throughput trade-offs depending
+on modality and sequence length under tested conditions — not a universal
+attention replacement. V9 text has five-seed support; V12 modality results
+are single-seed and preliminary. See `V12_RESEARCH_NOTES.md` for the full
+record including evidence classification and novelty boundaries.
 
 ---
 
