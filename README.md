@@ -10,7 +10,7 @@ parameter-matched standard Transformer on validation loss (**1.319 vs
 advantage from T=512 up, and pays only a modest throughput tax (**58.8k vs
 60.9k tok/s**) — same corpus, same protocol, exact parameter equality.
 
-This repo is the complete record of a thirteen-experiment campaign (V1–V11) run
+This repo is the complete record of a fourteen-experiment campaign (V1–V12) run
 2026-10-08→09 on a Colab T4 GPU: every architecture, every
 measurement, every design decision, and every anomaly — nothing smoothed over.
 
@@ -41,6 +41,10 @@ measurement, every design decision, and every anomaly — nothing smoothed over.
   (E1/E2/E3/E4/E5, all rejected/failed/falsified with mechanisms)
 - `V11_RESEARCH_NOTES.md` — V11 verdicts: D2a PASS, D1 PASS (with the dx
   transpose-bug saga), combined stack endpoint
+- `V12_RESEARCH_NOTES.md` — V12 verdicts: multimodal probe — V8-A wins
+  temporal (audio), attention wins spatial (vision); O(T) crossover at
+  T≈256–529 in both modalities; joint 2×2 control falsifies the
+  cross-modal rescue hypothesis (I=+0.0386)
 - `requirements.txt` — `torch`, `triton`
 
 ---
@@ -373,6 +377,37 @@ never checked `dx`; a falsified TF32 theory died first. **Stack (D1+D2a)**:
 the meaningful V11 endpoint: 839 → 520 MB reserved (−38%), step −10.9%.
 Peak falls and step time falls at every stage: attacking
 creation/save time works where post-hoc compression didn't.
+
+### V12 — multimodal V8-A: does the advantage survive non-text sequences?
+
+**Frozen discipline:** V8-A mixer + V11 implementation frozen; mixer-only
+comparison (same encoder, param budget, data, optimizer). AR next-element
+prediction: next-patch (vision), next-frame (audio), MSE loss.
+
+**Phase 1 (vision, ImageNette, T=256, 1500 steps):** attention 0.2102 vs
+V8-A 0.2578 — attention wins quality clearly (~22%). V8-A's text advantage
+does NOT automatically transfer to spatial sequences.
+
+**Phase 2 (audio, LibriSpeech, T=256, 1500 steps):** V8-A 0.0552 vs
+attention 0.0581 — V8-A wins narrowly (~5%). Pattern: temporal favors
+V8-A, spatial favors attention.
+
+**Phase 3 (scaling rungs, both modalities):** crossover between T=256–529
+in vision (1.97x at T=2025) and audio (2.23x at T=2025). Attention slightly
+leaner VRAM at every rung — throughput, not memory, is where O(T) wins.
+
+**Phase 4 (joint multimodal, Flickr8k):** 500-step pilot suggested gap
+narrowing (80%), but the matched 2×2 control (A=vis/attn, B=vis/v8a,
+C=joint/attn, D=joint/v8a) gave I=+0.0386 — joint training *hurts* V8-A's
+relative position. Attention's vision improves with text context
+(0.6035→0.5670); V8-A's does not. Predeclared rule: STOP, do not extend.
+The pilot was confounded; the control falsified the rescue hypothesis.
+Init-verification mismatch noted as a limitation for future retests.
+
+**Verdict:** a quality–efficiency trade-off depending on modality and
+sequence length — not a universal attention replacement. See
+`V12_RESEARCH_NOTES.md` for the full record including the evidence
+classification.
 
 ---
 
