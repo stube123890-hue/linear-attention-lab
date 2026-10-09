@@ -141,3 +141,16 @@ exactly what a controlled research process is supposed to do.
    components across arms).
 2. Rerun the 2×2 with the same protocol.
 3. Not needed immediately unless the answer would change research direction.
+
+## Write-up wording discipline (his)
+
+- The measured crossover and speedups are established for THESE
+  implementations and benchmark conditions — not for every linear-time
+  model or workload.
+- The results support a modality-dependent pattern, but broader claims
+  need more datasets and controlled replications.
+
+## Next-experiment protocol (his standing rule)
+
+When resuming: the brief determines the next experiment's question,
+baseline, controls, and stopping rule BEFORE implementation begins.
