@@ -10,7 +10,7 @@ parameter-matched standard Transformer on validation loss (**1.319 vs
 advantage from T=512 up, and pays only a modest throughput tax (**58.8k vs
 60.9k tok/s**) — same corpus, same protocol, exact parameter equality.
 
-This repo is the complete record of a fourteen-experiment campaign (V1–V12) run
+This repo is the complete record of a fifteen-experiment campaign (V1–V13) run
 2026-10-08→09 on a Colab T4 GPU: every architecture, every
 measurement, every design decision, and every anomaly — nothing smoothed over.
 
@@ -46,6 +46,10 @@ measurement, every design decision, and every anomaly — nothing smoothed over.
   T≈256–529 in both modalities; joint 2×2 did not support the cross-modal
   rescue hypothesis (I=+0.0386, init confound noted); seed-robustness,
   evidence boundaries, and novelty limits documented
+- `V13_RESEARCH_NOTES.md` — V13 verdicts: vision LR grid (3×2 arms, init
+  verified) — gap persists (+0.0449 vs Phase 1 +0.0476); useful negative
+  result for the tuning-artifact hypothesis, not proof of architectural
+  limitation; stopping decision documented
 - `requirements.txt` — `torch`, `triton`
 
 ---
@@ -411,6 +415,22 @@ on modality and sequence length under tested conditions — not a universal
 attention replacement. V9 text has five-seed support; V12 modality results
 are single-seed and preliminary. See `V12_RESEARCH_NOTES.md` for the full
 record including evidence classification and novelty boundaries.
+
+### V13 — vision hyperparameter probe: tuning artifact or fundamental?
+
+**Question:** does V8-A's ImageNette gap survive fair hyperparameter tuning,
+or is it an artifact of text-tuned settings?
+
+**Design:** LR grid {1e-4, 3e-4, 1e-3} × {V8-A, ATTN}, 1500 steps each,
+equal tuning budgets, tensor-verified init (6/6 INIT OK).
+
+**Result:** best V8-A 0.2413 vs best ATTN 0.1964 — gap +0.0449, essentially
+unchanged from Phase 1's +0.0476. **Gap persists.**
+
+**Verdict:** useful negative result for the tuning-artifact hypothesis. Not
+proof of architectural limitation — only persistent under the tested grid.
+Stopping rule applied: no further tuning without a concrete predeclared
+hypothesis. See `V13_RESEARCH_NOTES.md`.
 
 ---
 
